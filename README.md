@@ -1,2 +1,2 @@
 # Progressive_GAN
-Implimenting PGANs from zero
+Implementing PGANs from zero
