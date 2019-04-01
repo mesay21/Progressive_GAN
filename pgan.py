@@ -9,7 +9,7 @@ import glob
 from collections import OrderedDict
 
 tf.app.flags.DEFINE_integer("batch_size", 64, "mini batch training size")
-tf.app.flags.DEFINE_integer("epoch", 10, "number of training epochs")
+tf.app.flags.DEFINE_integer("epoch", 2, "number of training epochs")
 tf.app.flags.DEFINE_float("critic_lr", 1e-3, "critic learning rate")
 tf.app.flags.DEFINE_float('gen_lr', 1e-3, "Generator learning rate")
 tf.app.flags.DEFINE_integer('im_size', 32, "input image size")
@@ -34,11 +34,10 @@ class PGAN:
     def main_block(self, inputs, num_kernels, op):
         ##### takes an input and a list with the number of kernels for each layer #######
         if op=='upsample':
-            size = tf.shape(inputs)
-            inputs = tf.image.resize_nearest_neighbor(inputs, (size[0]*2, size[1]*2))
+            size = inputs.get_shape()
+            inputs = tf.image.resize_nearest_neighbor(inputs, (size[1]*2, size[1]*2))
         x = inputs
-        # for i, k in enumerate(num_kernels):
-        x = l.conv2d(x, k, 3, activation_fn=tf.nn.leaky_relu)
+        x = l.conv2d(x, num_kernels, 3, activation_fn=tf.nn.leaky_relu)
         if op=='downsample':
             x = l.avg_pool2d(x, 2)
         return x
@@ -60,11 +59,11 @@ class PGAN:
                 for i, k in enumerate(layers, 1):
                     if i==len(layers):
                         x_prev = x
-                    x = self.main_block(x, k[-1], 'upsample')
-
+                    x = self.main_block(x, k, 'upsample')
                 out = l.conv2d(x, 3, 1, activation_fn=tf.nn.tanh)
-                out_prev = tf.image.resize_nearest_neighbor(x_prev, (size[0]*2, size[1]*2))
-                out_prev = l.conv2d(x_prev, 3, 1, activation_fn=tf.nn.tanh)
+                size = out.get_shape()
+                out_prev = tf.image.resize_nearest_neighbor(x_prev, size=(size[1], size[1]))
+                out_prev = l.conv2d(out_prev, 3, 1, activation_fn=tf.nn.tanh)
                 out = (1 - alpha)*out_prev + alpha*out
                 return out
             else:
@@ -85,7 +84,7 @@ class PGAN:
                         assert x.shape==x_prev.shape
                         x = (1-alpha)*x + alpha*x_prev
                     else:
-                        x = main_block(x, k, 'downsample')
+                        x = self.main_block(x, k, 'downsample')
 
             x = self.critic_final_block(x, num_kernels)
             return x
@@ -98,6 +97,8 @@ class PGAN:
 
     def train(self, init_size, kernel):
         images, _ = self.load_data(self.d_path, [config.im_size, config.im_size, 3])
+        images = 2*(images/255)-1
+        print(np.min(images), np.max(images))
         kernel_list = self.get_filters(kernel)
         for i, v in enumerate(kernel_list.values(), 1):
             print('Started training %d layers'%(i))
@@ -122,7 +123,6 @@ class PGAN:
             with tf.name_scope('generator'):
                 g = self.generator(z, [init_size, v[0]], layers=v[1:], alpha=alpha)
                 out_shape = g.get_shape()[1]
-                print(out_shape)
             with tf.name_scope('discriminator'):
                 v.reverse()
                 d_real = self.discriminator(x, v[-1], out_shape, alpha, layers=v[1:])
@@ -163,18 +163,20 @@ class PGAN:
                     prev_ntk_saver.restore(sess, restore_dir)
                 summ_writer.add_graph(sess.graph)
                 ####### reading data is to be done#######
-                for i in tqdm(range(config.epoch)):
+                for a in tqdm(range(config.epoch)):
                     ###### run the networks #############
-                    for _ in range(len(images)//config.batch_size):
+                    for b in range(10):
+                        ratio = 1-(1/np.exp(b))
                         noise = np.random.normal(size=(config.batch_size, config.z_dim))
                         x_batch = sess.run(x_next)
                         x_batch = im_resize.eval(feed_dict={data:x_batch})
-                        sess.run(d_optim, feed_dict={x:x_batch, z:noise, alpha:0.5, lambda_:10, gamma:100})
-                        sess.run(g_optim, feed_dict={x:x_batch, z:noise, alpha:0.5, lambda_:10, gamma:100})
+                        sess.run(d_optim, feed_dict={x:x_batch, z:noise, alpha:ratio, lambda_:10, gamma:750})
+                        sess.run(g_optim, feed_dict={x:x_batch, z:noise, alpha:ratio, lambda_:10, gamma:750})
                     ###### write summary#######
-                    if i%5==1 or i==config.num_epochs:
+                    if a%5==1 or a==config.epoch:
                         ######## summary #########
-                        summ = sess.run(summary, feed_dict={x:x_batch, z:noise, alpha:0.5, lambda_:10, gamma:100})
+                        gen_images = g.eval(feed_dict={z:noise, alpha:ratio})
+                        summ = sess.run(summary, feed_dict={x:x_batch, z:noise, alpha:ratio, lambda_:10, gamma:750})
                         summ_writer.add_summary(summ, i)
                 saver.save(sess, chkpt_logdir)
             print('Finished training %d layers'%(i))
@@ -197,5 +199,11 @@ class PGAN:
         data = np.concatenate(data)
         assert(len(labels)==len(data))
         return data, labels
+def save_images(x, fname):
+    s = x.shape
+    x = np.concatenate([v.reshape(-1, s[-2], s[-1]) for v in np.split(x, 8, axis=0)], axis=1)
+    x = 255*(0.5*x + 0.5)
+    x = x.astype(np.uint8)
+    plt.imsave(fname, x)
 
 
