@@ -3,9 +3,20 @@ from matplotlib import pyplot as plt
 from tensorflow.contrib import layers as l
 from tqdm import tqdm
 import numpy as np
+
+tf.app.flags.DEFINE_integer("batch_size", 64, "mini batch training size")
+tf.app.flags.DEFINE_integer("epoch", 100, "number of training epochs")
+tf.app.flags.DEFINE_float("critic_lr", 1e-3, "critic learning rate")
+tf.app.flags.DEFINE_float('gen_lr', 1e-3, "Generator learning rate")
+tf.app.flags.DEFINE_integer('im_size', 32, "input image size")
+config=tf.app.flags.FLAGS
+config(sys.argv, known_only=True)
+
 class PGAN:
-    def __init__(self):
+    def __init__(self, d_path, save_path):
         ####initial variables to be defined
+        self.d_path = d_path
+        self.save_path = save_path
         print('Network initialized')
 
     def generator_init_block(self, inputs, out_size, num_kernels):
@@ -37,12 +48,12 @@ class PGAN:
             if reuse:
                 scope.reuse_variables()
             z =  tf.nn.l2_normalize(tf.random_normal(shape=(None, z_dim)), axis=1)
-            x = generator_init_block(z, init_size[0], init_size[1])
+            x = self.generator_init_block(z, init_size[0], init_size[1])
             if layers is not None:
                 for i, k in enumerate(layers, 1):
                     if i==len(layers):
                         x_prev = x
-                    x = main_block(x, k, i, 'upsample', 'g')
+                    x = self.main_block(x, k, i, 'upsample', 'g')
 
                 out = l.conv2d(x, 3, 1, name='output', activation_fn=tf.nn.tanh)
                 size = tf.shape(x_prev)
@@ -65,13 +76,13 @@ class PGAN:
                         size = tf.shape(inputs)
                         inputs = tf.image.resize_nearest_neighbor(inputs, (size[0]//2, size[1]//2))
                         x_prev = l.conv2d(inputs, num_kernels, 1, name='d_smooth-trans', activation_fn=tf.nn.leaky_relu)
-                        x = main_block(x, k, i, 'downsample', 'd')
+                        x = self.main_block(x, k, i, 'downsample', 'd')
                         assert x.shape==x_prev.shape
                         x = (1-alpha)*x + alpha*x_prev
                     else:
                         x = main_block(x, k, i, 'downsample', 'd')
 
-            x = critic_final_block(x, num_kernels)
+            x = self.critic_final_block(x, num_kernels)
             return x
     def minibatchstddev(self, x):
         x_shape = tf.shape(x)
@@ -83,10 +94,18 @@ class PGAN:
         return x
 
     def train(self, init_size, im_size, kernel, save_path):
+        images, _ = self.load_data(d_path)
         kernel_list = get_filters(kernel)
         for i, k, v in enumerate(kernel_list.items(), 1):
             print('Started training %d layers'%(i))
             tf.reset_default_graph()
+            #### Data reading #####################
+            data = tf.placeholder(tf.float32, shape=(None, config.image_size, config.image_size, 3))
+            x_read = tf.data.Dataset.from_tensor_slices(data)
+            x_read = x_read.shuffle(10000)
+            x_read = x_read.batch(config.batch_size)
+            x_iterator = x_read.make_initializable_iterator()
+            x_next = x_iterator.get_next()
             #### Create place holders #############
             x = tf.placeholder(tf.float32, shape=(None, im_size, im_size, 3), name='input_image')
             alpha = tf.placeholder(tf.float32, shape=(), name='contribution_ratio')
@@ -96,16 +115,16 @@ class PGAN:
 
             #### Create the network   #############
             with tf.name_scope('generator'):
-                g = generator(z_dim, [init_size, v[0]], layers=v[1:])
+                g = self.generator(z_dim, [init_size, v[0]], layers=v[1:])
             with tf.name_scope('discriminator'):
                 d_filters = v.reverse()
                 print('checking if filters are reversed', v, d_filters)
-                d_real = discriminator(x, v[-1], alpha, layers=d_filters[1:])
-                d_fake = discriminator(g, v[-1], alpha, layers=d_filters[1:], reuse=True)
+                d_real = self.discriminator(x, v[-1], alpha, layers=d_filters[1:])
+                d_fake = self.discriminator(g, v[-1], alpha, layers=d_filters[1:], reuse=True)
             with tf.name_scope('Loss'):
                 eps = tf.random_uniform(shape=tf.shape(x))
                 x_hat = (1-eps)*x + eps*g
-                d_hat = discriminator(x_hat, v[-1], alpha, layers=d_filters[1:], reuse=True)
+                d_hat = self.discriminator(x_hat, v[-1], alpha, layers=d_filters[1:], reuse=True)
                 d_grad = tf.gradients(d_hat, x_hat)[0]
                 print('gradient shape', d_grad.shape)
                 d_grad = tf.sqrt(tf.reduce_sum(tf.square(d_grad), axis=1))
@@ -134,12 +153,13 @@ class PGAN:
 
                 init_op = tf.group(tf.global_variables(), tf.local_variables())
             with tf.Session() as sess:
+                sess.run(x_iterator.initializer, feed_dict={data:images})
                 prev_ntk_saver.restore(sess, restore_dir)
                 for v in init_op:
                     if not v.is_variable_initialized():
                         sess.run(v.initializer)
                 summ_writer.add_graph(sess.graph)
-                ####### readin data is to be done#######
+                ####### reading data is to be done#######
                 for i in tqdm(range(num_epochs)):
                     ###### run the networks
                     print('to be done')
@@ -150,11 +170,24 @@ class PGAN:
 
 
             print('Finished training %d layers'%(i))
-    
+
     def get_filters(self, kernel_list):
         filters = dict()
         for i, k in enumerate(kernel_list, 1):
-            filters['network_%d'%(i)]=kernel_list[:i] 
-        return filters    
+            filters['network_%d'%(i)]=kernel_list[:i]
+        return filters
+
+    def load_data(self, path, im_size):
+        f_names = glob.glob(path)
+        data, labels = []
+        for l in f_names:
+            with open(l, 'rb') as f:
+                x = pickle.load(f, encoding='bytes')
+            data.append(x[b'data'].reshpe((-1, *im_size), order='F').swapaxes(2, 1))
+            labels.extend(x[b'labels'])
+        data = np.concatinate(data)
+        print('training set size', data.shape)
+        assert(len(labels)==len(data))
+        return data, labels
 
 
