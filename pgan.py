@@ -3,9 +3,7 @@ from matplotlib import pyplot as plt
 from tensorflow.contrib import layers as l
 from tqdm import tqdm
 import numpy as np
-import pickle
-import sys
-import glob
+import sys, glob, os, pickle
 from collections import OrderedDict
 
 tf.app.flags.DEFINE_integer("batch_size", 64, "mini batch training size")
@@ -24,29 +22,31 @@ class PGAN:
         self.save_path = save_path
         print('Network initialized')
 
-    def generator_init_block(self, inputs, out_size, num_kernels):
+    def generator_init_block(self, inputs, out_size, num_kernels, var_scope):
         ##### first layer of the generator #######
         num_h = (out_size**2)*num_kernels
-        x = l.fully_connected(inputs, num_h, activation_fn=tf.nn.leaky_relu)
+        x = l.fully_connected(inputs, num_h, activation_fn=tf.nn.leaky_relu, scope=var_scope +'_fc')
         x = tf.reshape(x, (-1, out_size, out_size, num_kernels))
-        x = l.conv2d(x, num_kernels, 3, activation_fn=tf.nn.leaky_relu)
+        x = l.conv2d(x, num_kernels, 3, activation_fn=tf.nn.leaky_relu, scope=var_scope + '_conv')
         return x
-    def main_block(self, inputs, num_kernels, op):
-        ##### takes an input and a list with the number of kernels for each layer #######
+    def main_block(self, inputs, num_kernels, op, var_scope):
+         ##### takes an input and a list with the number of kernels for each layer #######
         if op=='upsample':
             size = inputs.get_shape()
             inputs = tf.image.resize_nearest_neighbor(inputs, (size[1]*2, size[1]*2))
-        x = inputs
-        x = l.conv2d(x, num_kernels, 3, activation_fn=tf.nn.leaky_relu)
+            x = l.conv2d(inputs, num_kernels, 3, activation_fn=tf.nn.leaky_relu, scope=var_scope+'_conv_1')
+            x = l.conv2d(x, num_kernels//2, 3, activation_fn=tf.nn.leaky_relu, scope=var_scope+'_conv_2')
         if op=='downsample':
-            x = l.avg_pool2d(x, 2)
+            x = l.conv2d(inputs, num_kernels, 3, activation_fn=tf.nn.leaky_relu, scope=var_scope+'_conv_1')
+            x = l.conv2d(x, num_kernels*2, 3, activation_fn=tf.nn.leaky_relu, scope=var_scope+'_conv_2')
+            x = l.avg_pool2d(x, 2, scope=var_scope+'_pool')
         return x
-    def critic_final_block(self, x, num_kernels):
+    def critic_final_block(self, x, num_kernels, var_scope):
         x = self.minibatchstddev(x)
-        x = l.conv2d(x, num_kernels, 3, activation_fn=tf.nn.leaky_relu)
-        x = l.conv2d(x, num_kernels, 4, activation_fn=tf.nn.leaky_relu, padding='VALID')
-        x = l.flatten(x)
-        x = l.fully_connected(x, 1, activation_fn=None)
+        x = l.conv2d(x, num_kernels, 3, activation_fn=tf.nn.leaky_relu, scope=var_scope+'_conv_1')
+        x = l.conv2d(x, num_kernels, 4, activation_fn=tf.nn.leaky_relu, padding='VALID', scope=var_scope+'_conv_2')
+        x = l.flatten(x, scope=var_scope)
+        x = l.fully_connected(x, 1, activation_fn=None, scope=var_scope+'_fc')
         return x
 
     def generator(self, z, init_size, alpha, layers=None, reuse=False):
@@ -54,40 +54,41 @@ class PGAN:
             if reuse:
                 scope.reuse_variables()
             z =  tf.nn.l2_normalize(z, axis=1)
-            x = self.generator_init_block(z, init_size[0], init_size[1])
+            x = self.generator_init_block(z, init_size[0], init_size[1], 'g_layer_0')
             if layers:
                 for i, k in enumerate(layers, 1):
                     if i==len(layers):
                         x_prev = x
-                    x = self.main_block(x, k, 'upsample')
-                out = l.conv2d(x, 3, 1, activation_fn=tf.nn.tanh)
+                    x = self.main_block(x, k, 'upsample', 'g_layer_%d'%(i))
+                out = l.conv2d(x, 3, 1, activation_fn=tf.nn.tanh, scope='g_output_1')
                 size = out.get_shape()
-                out_prev = tf.image.resize_nearest_neighbor(x_prev, size=(size[1], size[1]))
-                out_prev = l.conv2d(out_prev, 3, 1, activation_fn=tf.nn.tanh)
+                ####### may be not correct #########
+                out_prev = tf.stop_gradient(tf.image.resize_nearest_neighbor(x_prev, size=(size[1], size[1])))
+                out_prev = l.conv2d(out_prev, 3, 1, activation_fn=tf.nn.tanh, scope='g_output_0')
                 out = (1 - alpha)*out_prev + alpha*out
                 return out
             else:
-                out = l.conv2d(x, 3, 1, activation_fn=tf.nn.tanh)
+                out = l.conv2d(x, 3, 1, activation_fn=tf.nn.tanh, scope='g_output_1')
                 return out
 
-    def discriminator(self, inputs, num_kernels, in_size, alpha, layers=None, reuse=False):
+    def discriminator(self, inputs, in_kernel, out_kernel, in_size, alpha, layers=None, reuse=False):
         with tf.variable_scope('discriminator') as scope:
             if reuse:
                 scope.reuse_variables()
-            x = l.conv2d(inputs, num_kernels, 1, activation_fn=tf.nn.leaky_relu)
+            x = l.conv2d(inputs, in_kernel, 1, activation_fn=tf.nn.leaky_relu, scope='d_input_conv_0')
             if layers:
                 for i, k in enumerate(layers, 1):
-                    if i==0:
-                        inputs = tf.image.resize_nearest_neighbor(inputs, (in_size//2, in_size//2))
-                        x_prev = l.conv2d(inputs, num_kernels, 1, activation_fn=tf.nn.leaky_relu)
-                        x = self.main_block(x, k, 'downsample')
-                        assert x.shape==x_prev.shape
+
+                    idx = (len(layers)-i) + 1
+                    if i==1:
+                        inputs = tf.stop_gradient(tf.image.resize_nearest_neighbor(inputs, (in_size//2, in_size//2)))
+                        x_prev = l.conv2d(inputs, k*2, 1, activation_fn=tf.nn.leaky_relu, scope='d_input_conv_1')
+                        x = self.main_block(x, k, 'downsample', 'd_layer_%d'%(idx))
                         x = (1-alpha)*x + alpha*x_prev
                     else:
-                        x = self.main_block(x, k, 'downsample')
-
-            x = self.critic_final_block(x, num_kernels)
-            return x
+                        x = self.main_block(x, k, 'downsample', 'd_layer_%d'%(idx))
+            x = self.critic_final_block(x, out_kernel, 'd_layer_0')
+        return x
     def minibatchstddev(self, x):
         _, x_std = tf.nn.moments(x, axes=0)
         x_mean, _ = tf.nn.moments(x_std, axes=[0, 1, 2], keep_dims=True)
@@ -98,8 +99,9 @@ class PGAN:
     def train(self, init_size, kernel):
         images, _ = self.load_data(self.d_path, [config.im_size, config.im_size, 3])
         images = 2*(images/255)-1
-        print(np.min(images), np.max(images))
         kernel_list = self.get_filters(kernel)
+        partial_vars = dict()
+        trained_weight = dict()
         for i, v in enumerate(kernel_list.values(), 1):
             print('Started training %d layers'%(i))
             tf.reset_default_graph()
@@ -111,33 +113,35 @@ class PGAN:
             x_iterator = x_read.make_initializable_iterator()
             x_next = x_iterator.get_next()
             #### Create place holders #############
-            x = tf.placeholder(tf.float32, shape=(None, init_size*i, init_size*i, 3), name='input_image')
+            x = tf.placeholder(tf.float32, shape=(None, init_size*(2**(i-1)), init_size*(2**(i-1)), 3), name='input_image')
             z = tf.placeholder(tf.float32, shape=(None, config.z_dim), name='noise_input')
             alpha = tf.placeholder(tf.float32, shape=(), name='contribution_ratio')
             beta = tf.placeholder(tf.float32, shape=(), name='gp_ratio')
             gamma = tf.placeholder(tf.float32, shape=(), name='gamma_value')
             lambda_ = tf.placeholder(tf.float32, shape=(), name='gp_contribution')
-            im_resize = tf.image.resize_nearest_neighbor(data, size=(init_size*i, init_size*i))
+            im_resize = tf.image.resize_nearest_neighbor(data, size=(init_size*(2**(i-1)), init_size*(2**(i-1))))
 
             #### Create the network   #############
             with tf.name_scope('generator'):
                 g = self.generator(z, [init_size, v[0]], layers=v[1:], alpha=alpha)
                 out_shape = g.get_shape()[1]
+                print('generator output', g.shape)
             with tf.name_scope('discriminator'):
                 v.reverse()
-                d_real = self.discriminator(x, v[-1], out_shape, alpha, layers=v[1:])
-                d_fake = self.discriminator(g, v[-1], out_shape, alpha, layers=v[1:], reuse=True)
+                d_real = self.discriminator(x, v[0], v[-1], out_shape, alpha, layers=v[:-1])
+                d_fake = self.discriminator(g, v[0], v[-1], out_shape, alpha, layers=v[:-1], reuse=True)
             with tf.name_scope('Loss'):
                 eps = tf.random_uniform(shape=tf.shape(g))
                 x_hat = (1-eps)*x + eps*g
-                d_hat = self.discriminator(x_hat, v[-1], out_shape, alpha, layers=v[1:], reuse=True)
+                d_hat = self.discriminator(x_hat, v[0], v[-1], out_shape, alpha, layers=v[:-1], reuse=True)
                 d_grad = tf.gradients(d_hat, x_hat)[0]
                 d_grad = tf.sqrt(tf.reduce_sum(tf.square(d_grad), axis=(1, 2, 3)))
                 gp = tf.reduce_mean(((d_grad - gamma)**2)/(gamma**2))
                 d_loss = tf.reduce_mean(d_fake)-tf.reduce_mean(d_real) + lambda_*gp
                 g_loss = -tf.reduce_mean(d_fake)
-            g_vars = [v for v in tf.trainable_variables() if 'generator' in v.name]
-            d_vars = [v for v in tf.trainable_variables() if 'discriminator' in v.name]
+            g_vars = [w for w in tf.trainable_variables() if 'generator' in w.name]
+            d_vars = [w for w in tf.trainable_variables() if 'discriminator' in w.name]
+            partial_vars['layer_%d'%(i)] = [w for w in g_vars if not 'g_output' in w.name] + [w for w in d_vars if not 'd_input' in w.name]
             with tf.name_scope('optimization'):
                 g_optim = tf.train.AdamOptimizer(0.001, 0.0, 0.99, name='g_optimizer').minimize(g_loss, var_list=g_vars)
                 d_optim = tf.train.AdamOptimizer(0.001, 0.0, 0.99, name='d_optimizer').minimize(d_loss, var_list=d_vars)
@@ -145,23 +149,25 @@ class PGAN:
                 d_loss_summ = tf.summary.scalar('critic_loss', d_loss)
                 g_loss_summ = tf.summary.scalar('generator_loss', g_loss)
                 summary = tf.summary.merge_all()
-                summ_logdir = self.save_path + '/summary/'
-                chkpt_logdir = self.save_path + '/checkpoint/%d_layers.ckpt'%(i)
+                summ_logdir = self.save_path + 'summary/'
+                im_path = self.save_path + 'images/%d_layers/'%(i)
+                full_model_logdir = self.save_path + 'checkpoint/%d_layers_model.ckpt'%(i)
+                partial_model_logdir = self.save_path + 'checkpoint/%d_partial_model.ckpt'%(i)
                 summ_writer = tf.summary.FileWriter(summ_logdir)
-                saver = tf.train.Saver()
-                if i>1:
-                    restore_dir = save_path + '/checkpoint/%d_layers.ckpt'%(i-1)
-                    prev_ntk = [v for v in g_vars if not 'g_conv_%d'%(i) in v.name] +\
-                        [v for v in d_vars if not 'd_conv_%d'%(i) in v.name]
-                    prev_ntk_saver = tf.train.Saver(prev_ntk)
-
-                init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
+            with tf.name_scope('save_operation'):
+                full_model = tf.train.Saver(name='full_model_saver')
+                partial_model = tf.train.Saver(partial_vars['layer_%d'%(i)], name='partail_model_saver')
+                if not os.path.isdir(im_path):
+                    os.makedirs(im_path)
+            init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
             with tf.Session() as sess:
-                sess.run(x_iterator.initializer, feed_dict={data:images})
                 sess.run(init_op)
                 if i>1:
-                    prev_ntk_saver.restore(sess, restore_dir)
+                    for w in tf.global_variables():
+                        if w.name in trained_weight.keys():
+                            w.load(trained_weight[w.name])
                 summ_writer.add_graph(sess.graph)
+                sess.run(x_iterator.initializer, feed_dict={data:images})
                 ####### reading data is to be done#######
                 for a in tqdm(range(config.epoch)):
                     ###### run the networks #############
@@ -176,9 +182,14 @@ class PGAN:
                     if a%5==1 or a==config.epoch:
                         ######## summary #########
                         gen_images = g.eval(feed_dict={z:noise, alpha:ratio})
+                        self.save_images(gen_images, im_path+'gen_%d.png'%(a))
+                        self.save_images(x_batch, im_path+'real_%d.png'%(a))
                         summ = sess.run(summary, feed_dict={x:x_batch, z:noise, alpha:ratio, lambda_:10, gamma:750})
                         summ_writer.add_summary(summ, i)
-                saver.save(sess, chkpt_logdir)
+                full_model.save(sess, full_model_logdir)
+                partial_model.save(sess, partial_model_logdir, strip_default_attrs=True, write_meta_graph=False)
+                for w in partial_vars['layer_%d'%(i)]:
+                    trained_weight[w.name] = sess.run(w.value())
             print('Finished training %d layers'%(i))
 
     def get_filters(self, kernel_list):
@@ -199,11 +210,11 @@ class PGAN:
         data = np.concatenate(data)
         assert(len(labels)==len(data))
         return data, labels
-def save_images(x, fname):
-    s = x.shape
-    x = np.concatenate([v.reshape(-1, s[-2], s[-1]) for v in np.split(x, 8, axis=0)], axis=1)
-    x = 255*(0.5*x + 0.5)
-    x = x.astype(np.uint8)
-    plt.imsave(fname, x)
+    def save_images(self, x, fname):
+        s = x.shape
+        x = np.concatenate([v.reshape(-1, s[-2], s[-1]) for v in np.split(x, 8, axis=0)], axis=1)
+        x = 255*(0.5*x + 0.5)
+        x = x.astype(np.uint8)
+        plt.imsave(fname, x)
 
 
