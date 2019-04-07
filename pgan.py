@@ -48,10 +48,8 @@ class PGAN:
         if op=='downsample':
             x = l.conv2d(inputs, num_kernels, 3, activation_fn=tf.nn.leaky_relu,\
                  scope=var_scope+'_conv_1', weights_initializer=init)
-            x = self.pixel_normalization(x)
             x = l.conv2d(x, num_kernels*2, 3, activation_fn=tf.nn.leaky_relu,\
                  scope=var_scope+'_conv_2', weights_initializer=init)
-            x = self.pixel_normalization(x)
             x = l.avg_pool2d(x, 2, scope=var_scope+'_pool')
         return x
     def critic_final_block(self, x, num_kernels, var_scope):

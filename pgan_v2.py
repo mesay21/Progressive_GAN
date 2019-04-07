@@ -36,8 +36,6 @@ class PGAN:
         x = tf.reshape(x, shape=(-1, self.init_size, self.init_size, self.num_filters))
         x = l.conv2d(x, self.num_filters, 3, activation_fn=self.activation,\
             weights_initializer=self.weight_init, scope='g_layer_0_conv')
-        print(x)
-        print(type(x), x.name)
         return x
     def gen_output(self, x, name=''):
         """
@@ -61,7 +59,7 @@ class PGAN:
         x = l.conv2d(x, num_filters[1], 3, activation_fn=self.activation,\
             weights_initializer=self.weight_init, scope=name+'_conv_2')
         return x
-    def generator(self, z, alpha, d, graph=None, filters=None, reuse=False):
+    def generator(self, z, alpha, d, graph=None, filters=None, reuse=False, name=''):
         """
         Creates the generator network
         Inputa: z---noise vector with random points from a hypersphere
@@ -75,7 +73,7 @@ class PGAN:
             if reuse:
                 scope.reuse_variables()
             if graph:
-                x = graph.get_tensor_by_name('generator/generator/g_layer_0_conv/LeakyRelu:0')
+                x = graph.get_tensor_by_name(name)
                 print(x.shape)
                 x_size = x.get_shape().as_list()[1]
                 x_upsample = tf.stop_gradient(tf.image.resize_nearest_neighbor(x, size=(x_size*2, x_size*2)))
@@ -86,7 +84,7 @@ class PGAN:
             else:
                 x = self.gen_input(z)
                 out = self.gen_output(x)
-        return out
+        return out, x.name
 
     def discriminator(self, ):
         print("to be done")
@@ -106,9 +104,9 @@ class PGAN:
                 alpha = tf.placeholder(tf.float32, shape=(), name='smoothing_ratio')
             with tf.name_scope('generator'):
                 if i>1:
-                    gen = self.generator(z, alpha, i, graph, filters=k[-1])
+                    gen, tensor_name = self.generator(z, alpha, i, graph, filters=k[-1], name=tensor_name)
                 else:
-                    gen = self.generator(z, alpha, i)
+                    gen, tensor_name = self.generator(z, alpha, i)
 
             g_vars = [w for w in tf.trainable_variables() if 'generator' in w.name]
             print('layer: ', i, gen.shape)
