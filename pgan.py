@@ -7,7 +7,7 @@ import sys, glob, os, pickle
 from collections import OrderedDict
 
 tf.app.flags.DEFINE_integer("batch_size", 64, "mini batch training size")
-tf.app.flags.DEFINE_integer("epoch", 5, "number of training epochs")
+tf.app.flags.DEFINE_integer("epoch", 100, "number of training epochs")
 tf.app.flags.DEFINE_float("critic_lr", 1e-3, "critic learning rate")
 tf.app.flags.DEFINE_float('gen_lr', 1e-3, "Generator learning rate")
 tf.app.flags.DEFINE_integer('im_size', 32, "input image size")
@@ -48,10 +48,8 @@ class PGAN:
         if op=='downsample':
             x = l.conv2d(inputs, num_kernels, 3, activation_fn=tf.nn.leaky_relu,\
                  scope=var_scope+'_conv_1', weights_initializer=init)
-            x = self.pixel_normalization(x)
             x = l.conv2d(x, num_kernels*2, 3, activation_fn=tf.nn.leaky_relu,\
                  scope=var_scope+'_conv_2', weights_initializer=init)
-            x = self.pixel_normalization(x)
             x = l.avg_pool2d(x, 2, scope=var_scope+'_pool')
         return x
     def critic_final_block(self, x, num_kernels, var_scope):
@@ -80,19 +78,20 @@ class PGAN:
                     if i==len(layers):
                         x_prev = x
                     x = self.main_block(x, k, 'upsample', 'g_layer_%d'%(i))
-                out = l.conv2d(x, 3, 1, activation_fn=tf.nn.tanh,\
+                out = l.conv2d(x, 3, 1, activation_fn=None,\
                      scope='g_output_1', weights_initializer=init)
                 size = out.get_shape()
                 ####### may be not correct #########
                 out_prev = tf.stop_gradient(tf.image.resize_nearest_neighbor(x_prev, size=(size[1], size[1])))
-                out_prev = l.conv2d(out_prev, 3, 1, activation_fn=tf.nn.tanh,\
+                out_prev = l.conv2d(out_prev, 3, 1, activation_fn=None,\
                      scope='g_output_0', weights_initializer=init)
                 out = (1 - alpha)*out_prev + alpha*out
                 return out
             else:
-                out = l.conv2d(x, 3, 1, activation_fn=tf.nn.tanh,\
+                out = l.conv2d(x, 3, 1, activation_fn=None,\
                      scope='g_output_1', weights_initializer=init)
-                return out
+            out = tf.clip_by_value(out, -1, 1, name='limitoutputrange')
+            return out
 
     def discriminator(self, inputs, in_kernel, out_kernel, in_size, alpha, layers=None, reuse=False):
         with tf.variable_scope('discriminator') as scope:
@@ -180,7 +179,7 @@ class PGAN:
                 d_loss_summ = tf.summary.scalar('critic_loss', d_loss)
                 g_loss_summ = tf.summary.scalar('generator_loss', g_loss)
                 summary = tf.summary.merge_all()
-                summ_logdir = self.save_path + 'summary/'
+                summ_logdir = self.save_path + 'summary/%d_layers/'%(i)
                 im_path = self.save_path + 'images/%d_layers/'%(i)
                 full_model_logdir = self.save_path + 'checkpoint/%d_layers_model.ckpt'%(i)
                 partial_model_logdir = self.save_path + 'checkpoint/%d_partial_model.ckpt'%(i)
@@ -204,13 +203,12 @@ class PGAN:
                     ###### run the networks #############
                     num_minibatches = len(images)//config.batch_size
                     for b in range(num_minibatches):
-                        ratio = 1-(1/np.exp(b/num_minibatches))
-                        print
+                        ratio = b/num_minibatches
                         noise = np.random.normal(size=(config.batch_size, config.z_dim))
                         x_batch = sess.run(x_next)
                         x_batch = im_resize.eval(feed_dict={data:x_batch})
-                        sess.run(d_optim, feed_dict={x:x_batch, z:noise, alpha:ratio, lambda_:10, gamma:750})
-                        sess.run(g_optim, feed_dict={x:x_batch, z:noise, alpha:ratio, lambda_:10, gamma:750})
+                        sess.run(d_optim, feed_dict={x:x_batch, z:noise, alpha:ratio, lambda_:10., gamma:250.})
+                        sess.run(g_optim, feed_dict={x:x_batch, z:noise, alpha:ratio, lambda_:10., gamma:250.})
                         sess.run(weight_clip)
                     ###### write summary#######
                     # if a%5==0 or a==(config.epoch-1):
@@ -218,7 +216,7 @@ class PGAN:
                     gen_images = g.eval(feed_dict={z:noise, alpha:ratio})
                     self.save_images(gen_images, im_path+'gen_%d.png'%(a))
                     self.save_images(x_batch, im_path+'real_%d.png'%(a))
-                    summ = sess.run(summary, feed_dict={x:x_batch, z:noise, alpha:ratio, lambda_:10, gamma:750})
+                    summ = sess.run(summary, feed_dict={x:x_batch, z:noise, alpha:1., lambda_:10, gamma:250})
                     summ_writer.add_summary(summ, i)
                 full_model.save(sess, full_model_logdir)
                 partial_model.save(sess, partial_model_logdir, strip_default_attrs=True, write_meta_graph=False)
