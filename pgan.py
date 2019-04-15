@@ -6,7 +6,7 @@ import numpy as np
 import sys, glob, os, pickle
 from collections import OrderedDict
 
-tf.app.flags.DEFINE_integer("batch_size", 16, "mini batch training size")
+tf.app.flags.DEFINE_integer("batch_size", 64, "mini batch training size")
 tf.app.flags.DEFINE_integer("epoch", 100, "number of training epochs")
 tf.app.flags.DEFINE_float("critic_lr", 1e-3, "critic learning rate")
 tf.app.flags.DEFINE_float('gen_lr', 1e-3, "Generator learning rate")
