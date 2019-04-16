@@ -127,6 +127,7 @@ class PGAN:
         partial_vars = dict()
         trained_weight = dict()
         for i, v in enumerate(kernel_list.values(), 1):
+            config.batch_size = config.batch_size//(2**(i-1))
             print('Started training %d layers'%(i))
             tf.reset_default_graph()
             #### Data reading #####################
@@ -188,13 +189,12 @@ class PGAN:
                 summ_writer = tf.summary.FileWriter(summ_logdir)
             with tf.name_scope('save_operation'):
                 full_model = tf.train.Saver(name='full_model_saver')
-                partial_model = tf.train.Saver(partial_vars['layer_%d'%(i)], name='partail_model_saver')
                 if not os.path.isdir(im_path):
                     os.makedirs(im_path)
             vars_ = tf.global_variables()
             init_vars = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
             tf.get_default_graph().finalize()
-            with tf.Session(config=tf.ConfigProto(log_device_placement=True)) as sess:
+            with tf.Session() as sess:
                 sess.run(init_vars)
                 sess.run(weight_clip)
                 if i>1:
@@ -208,35 +208,20 @@ class PGAN:
                     ###### run the networks #############
                     num_minibatches = len(images)//config.batch_size
                     for _ in range(num_minibatches):###to be changed
-                        # for w in weights:
-                        #     print(w.name, np.min(w.eval()), np.max(w.eval()))
                         noise = np.random.normal(size=(config.batch_size, config.z_dim))
                         x_batch = sess.run(x_next)
-                        # print(x_batch.shape, type(x_batch))
                         x_batch = im_resize.eval(feed_dict={data:x_batch})
-                        # print(x_batch.shape, type(x_batch))
-                        # gen_images = g.eval(feed_dict={z:noise})
                         sess.run(d_optim, feed_dict={x:x_batch, z:noise, lambda_:10., gamma:750.})
                         _, d_r, d_f = sess.run([g_optim, d_real, d_fake], feed_dict={x:x_batch, z:noise, lambda_:10., gamma:750.})
-                        # if i>1:
-                        #     print('real', d_r); print('fake', d_f)
-                        #     print(np.min(x_batch), np.max(x_batch))
-                        #     print(np.min(gen_images), np.max(gen_images))
                     sess.run(trans, feed_dict={step:np.float(a)})
                     ###### write summary#######
-                    # if a%5==0 or a==(config.epoch-1):
-                ######## summary #########
                     gen_images = np.clip(g.eval(feed_dict={z:noise}), -1., 1.)
                     self.save_images(gen_images, im_path+'gen_%d.png'%(a))
                     self.save_images(x_batch, im_path+'real_%d.png'%(a))
                     summ, d_l, g_l = sess.run([summary, d_loss, g_loss], feed_dict={x:x_batch, z:noise, lambda_:10, gamma:250})
                     summ_writer.add_summary(summ, a)
-                    # print('Iteration: %d critic loss: %f generator loss %f'%(a, d_l, g_l))
                 full_model.save(sess, full_model_logdir)
-                partial_model.save(sess, partial_model_logdir, strip_default_attrs=True, write_meta_graph=False)
-                for w in partial_vars['layer_%d'%(i)]:
-                    trained_weight[w.name] = w.eval()
-                    print(w.name)
+                for w in partial_vars['layer_%d'%(i)]:trained_weight[w.name] = w.eval()
             print('Finished training %d layers'%(i))
 
     def get_filters(self, kernel_list):
